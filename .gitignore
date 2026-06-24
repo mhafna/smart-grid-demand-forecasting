@@ -12,6 +12,7 @@ ENV/
 # Environment variables and local secrets
 .env
 .env.*
+!.env.example
 
 # Build and packaging output
 build/

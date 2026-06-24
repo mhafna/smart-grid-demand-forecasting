@@ -1,2 +1,6 @@
 # Project dependencies will be added gradually as they are needed.
 # Each dependency should be added with a short explanation in the project notes or commit message.
+
+# No external package is needed for src/fetch_eia_sample.py.
+# It uses Python's standard library to read EIA_API_KEY, make one HTTPS request,
+# validate the JSON response, and save the raw file.
