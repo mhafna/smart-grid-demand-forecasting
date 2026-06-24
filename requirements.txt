@@ -1,0 +1,2 @@
+# Project dependencies will be added gradually as they are needed.
+# Each dependency should be added with a short explanation in the project notes or commit message.
