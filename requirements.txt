@@ -4,3 +4,6 @@
 # No external package is needed for src/fetch_eia_sample.py.
 # It uses Python's standard library to read EIA_API_KEY, make one HTTPS request,
 # validate the JSON response, and save the raw file.
+
+# pandas is used for tabular data preparation and time-series analysis.
+pandas
