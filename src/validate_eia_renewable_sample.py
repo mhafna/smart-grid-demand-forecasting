@@ -24,7 +24,7 @@ EXPECTED_ROW_FIELDS = {
     "respondent",
     "respondent-name",
     "fueltype",
-    "fueltype-name",
+    "type-name",
     "value",
     "value-units",
 }
@@ -142,6 +142,7 @@ def validate_sample(renewable_path: Path, demand_path: Path) -> int:
     respondents: Counter[str] = Counter()
     fuel_types: Counter[str] = Counter()
     fuel_names: Counter[str] = Counter()
+    labels_by_fuel: dict[str, Counter[str]] = defaultdict(Counter)
     units: Counter[str] = Counter()
     non_numeric_values: list[str] = []
 
@@ -173,8 +174,11 @@ def validate_sample(renewable_path: Path, demand_path: Path) -> int:
             respondents[row["respondent"]] += 1
         if isinstance(fuel_type, str):
             fuel_types[fuel_type] += 1
-        if isinstance(row.get("fueltype-name"), str):
-            fuel_names[row["fueltype-name"]] += 1
+        fuel_label = row.get("type-name")
+        if isinstance(fuel_label, str):
+            fuel_names[fuel_label] += 1
+            if isinstance(fuel_type, str):
+                labels_by_fuel[fuel_type][fuel_label] += 1
         if isinstance(row.get("value-units"), str):
             units[row["value-units"]] += 1
 
@@ -228,6 +232,9 @@ def validate_sample(renewable_path: Path, demand_path: Path) -> int:
     print(f"- Respondent values: {compact_counts(respondents)}")
     print(f"- Available fuel categories: {compact_counts(fuel_types)}")
     print(f"- Fuel labels: {compact_counts(fuel_names)}")
+    print("- Fuel labels by code:")
+    for fuel_type in sorted(EXPECTED_FUELS | set(labels_by_fuel)):
+        print(f"  - {fuel_type}: {compact_counts(labels_by_fuel[fuel_type])}")
     print(
         "- Missing expected fuel categories: "
         f"{'none' if not missing_expected_fuels else ', '.join(sorted(missing_expected_fuels))}"
