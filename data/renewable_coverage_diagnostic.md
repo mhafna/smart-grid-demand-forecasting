@@ -1,85 +1,73 @@
 # Renewable Coverage Diagnostic
 
-## Current Known Discrepancy
+## Confirmed Result
 
-The main historical downloader stopped safely before saving files.
+The focused diagnostic examined CISO `SUN` and `WND` coverage for the inclusive
+period 2022-01-01 through 2024-12-31.
 
-- Period: 2022-01-01 through 2024-12-31, inclusive
-- Demand rows downloaded: 26,304 of 26,304
-- EIA reported renewable rows: 52,560
-- Theoretical renewable rows: 52,608
-- Difference: 48 renewable rows
-
-The downloader should remain strict until the missing coverage is understood.
-No rows should be interpolated, filled, deleted, or fabricated.
-
-## Diagnostic Script
-
-Run:
-
-```powershell
-python src\diagnose_eia_renewable_coverage.py
-```
-
-The script reads `EIA_API_KEY` from the environment, prints a report, and does
-not write or alter the main historical raw files.
-
-## What The Diagnostic Checks
-
-The diagnostic uses EIA's returned `response.total` as the API pagination truth.
-It separately compares those totals with theoretical complete hourly coverage.
-
-It checks:
-
-- CISO `SUN` totals by year
-- CISO `WND` totals by year
-- monthly totals only inside deficient years
-- row-level coverage only for affected months
-- missing timestamp/fuel combinations
-- duplicate timestamp/fuel combinations
-- whether focused pagination matched EIA `response.total`
-- whether the first and last requested days look complete
+- Demand: 26,304 observed of 26,304 theoretical hourly rows
+- Solar (`SUN`): 26,280 observed of 26,304 theoretical hourly rows
+- Wind (`WND`): 26,280 observed of 26,304 theoretical hourly rows
+- Combined renewables: 52,560 observed of 52,608 theoretical rows
+- Renewable shortfall: 48 rows, representing 24 hours for both fuels
 
 ## Exact Affected Timestamps
 
-Not yet determined in this repository because the diagnostic has not been run
-with a valid `EIA_API_KEY`.
+Both `SUN` and `WND` are missing at every timestamp in this inclusive block:
 
-After running the script, copy the affected timestamp/fuel combinations from
-the `Missing timestamp/fuel combinations` lines into this section. Do not infer
-the missing hours from the 48-row difference alone.
+```text
+2024-11-02T08
+2024-11-02T09
+2024-11-02T10
+2024-11-02T11
+2024-11-02T12
+2024-11-02T13
+2024-11-02T14
+2024-11-02T15
+2024-11-02T16
+2024-11-02T17
+2024-11-02T18
+2024-11-02T19
+2024-11-02T20
+2024-11-02T21
+2024-11-02T22
+2024-11-02T23
+2024-11-03T00
+2024-11-03T01
+2024-11-03T02
+2024-11-03T03
+2024-11-03T04
+2024-11-03T05
+2024-11-03T06
+2024-11-03T07
+```
 
-## SUN, WND, Or Both
+No other missing timestamp is documented or allowed by the historical
+validator.
 
-Not yet determined. The diagnostic requests `SUN` and `WND` separately by year,
-then by month for any deficient year. This will show whether the shortfall is
-solar only, wind only, or both.
+## Cause
 
-## Source Missingness Versus Script Defect
+This is confirmed EIA source-data missingness, not a downloader defect:
 
-Current evidence:
+- Focused pagination downloaded exactly the rows reported by EIA
+  `response.total`.
+- No duplicate timestamp/fuel combinations were found.
+- The first and last requested days were complete.
+- The missing rows form one internal block, so inclusive date-boundary handling
+  did not cause the shortfall.
 
-- Demand coverage completed exactly at the theoretical 26,304 rows.
-- The renewable discrepancy came from EIA's own reported total being 52,560,
-  not from a partial saved file.
-- The main downloader did not silently drop rows; it stopped before writing.
+## Project Decision
 
-The likely cause must remain unclassified until the diagnostic confirms whether
-focused pagination is complete, whether duplicates exist, and whether the exact
-missing timestamp/fuel combinations are inside the requested date boundaries.
+The workflow preserves these 24 unavailable renewable hours as missing values.
+It does not interpolate them, replace them with zeros, delete their demand
+timestamps, or fabricate replacement observations. The processed dataset marks
+the affected rows with `renewable_data_complete = False`.
 
-## Safe Project Options
+Zero would claim that CISO reported no solar or wind generation during these
+hours. The source instead supplied no observations, which is a different fact.
 
-After the diagnostic identifies the exact issue, safe options include:
+## Safe Use
 
-- Keep the strict downloader unchanged and choose a different complete
-  historical window.
-- Keep the strict downloader unchanged and document that this EIA route has
-  missing renewable source rows for the affected timestamp/fuel combinations.
-- Add an explicit, documented allowlist for known missing EIA source rows only
-  if the project decides that downstream analysis can handle an incomplete
-  renewable series.
-- Use a different official source or route for renewable generation if it
-  provides complete CISO hourly `SUN` and `WND` coverage for the chosen period.
-
-Do not automatically interpolate, fill, or delete observations.
+The validator accepts only this exact block for both fuels. Any additional,
+shorter, longer, shifted, or fuel-specific gap fails validation and must be
+diagnosed before analysis continues.

@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -218,12 +219,14 @@ def fetch_all_pages(
     end: str,
     expected_rows: int,
     label: str,
+    identity_fields: tuple[str, ...],
 ) -> dict[str, Any]:
-    """Fetch all EIA pages into memory before anything is written to disk."""
+    """Fetch exactly response.total unique rows before anything is written."""
     pages: list[dict[str, Any]] = []
     offset = 0
     total: int | None = None
     downloaded_rows = 0
+    identities: Counter[tuple[Any, ...]] = Counter()
 
     while total is None or offset < total:
         params = params_builder(api_key, start, end, offset)
@@ -237,10 +240,21 @@ def fetch_all_pages(
 
         if total is None:
             total = page_total
-            if total != expected_rows:
+            if total < expected_rows:
+                print(
+                    f"WARNING: EIA reports {total} available {label} rows, "
+                    f"{expected_rows - total} fewer than the theoretical "
+                    f"{expected_rows} rows for complete hourly coverage."
+                )
+                print(
+                    "The download will preserve the source response without "
+                    "filling missing observations."
+                )
+            elif total > expected_rows:
                 raise RuntimeError(
-                    f"EIA reported {total} {label} rows, but {expected_rows} were "
-                    "expected for the requested complete hourly range. Nothing was saved."
+                    f"EIA reported {total} {label} rows, which exceeds the "
+                    f"theoretical {expected_rows} rows for the requested range. "
+                    "Nothing was saved."
                 )
         elif page_total != total:
             raise RuntimeError(
@@ -254,22 +268,47 @@ def fetch_all_pages(
                 "making progress. Nothing was saved."
             )
 
+        if downloaded_rows + len(rows) > total:
+            raise RuntimeError(
+                f"The {label} pages returned more rows than response.total={total}. "
+                "Nothing was saved."
+            )
+
+        for row_number, row in enumerate(rows, start=downloaded_rows + 1):
+            identity = tuple(row.get(field) for field in identity_fields)
+            if any(value is None or value == "" for value in identity):
+                raise RuntimeError(
+                    f"{label} row {row_number} is missing an identity field from "
+                    f"{', '.join(identity_fields)}. Nothing was saved."
+                )
+            identities[identity] += 1
+
+        duplicate_identities = [
+            identity for identity, count in identities.items() if count > 1
+        ]
+        if duplicate_identities:
+            preview = ", ".join(repr(identity) for identity in duplicate_identities[:5])
+            raise RuntimeError(
+                f"The {label} download contains duplicate row identities: {preview}. "
+                "Nothing was saved."
+            )
+
         redact_api_key_metadata(payload)
         pages.append(payload)
         downloaded_rows += len(rows)
         offset += len(rows)
         print(f"Downloaded {downloaded_rows}/{total} {label} rows.")
 
-    if downloaded_rows != expected_rows:
+    if total is None or downloaded_rows != total:
         raise RuntimeError(
-            f"Downloaded {downloaded_rows} {label} rows, but expected {expected_rows}. "
-            "Nothing was saved."
+            f"Downloaded {downloaded_rows} {label} rows, but EIA response.total "
+            f"was {total}. Nothing was saved."
         )
 
     return {
         "note": (
-            "Untouched EIA page responses. Rows are preserved in "
-            "pages[].response.data exactly as returned by EIA."
+            "EIA rows are preserved in pages[].response.data exactly as returned. "
+            "The only metadata change is redaction of an echoed API key."
         ),
         "download": {
             "respondent": RESPONDENT,
@@ -277,7 +316,11 @@ def fetch_all_pages(
             "end": end,
             "end_handling": "inclusive command-line end date converted to YYYY-MM-DDT23",
             "page_size": PAGE_SIZE,
-            "expected_rows": expected_rows,
+            "theoretical_rows": expected_rows,
+            "source_total_rows": total,
+            "source_coverage_shortfall_rows": expected_rows - total,
+            "downloaded_rows": downloaded_rows,
+            "page_count": len(pages),
         },
         "pages": pages,
     }
@@ -341,6 +384,7 @@ def main() -> int:
             end,
             expected_hours,
             "demand",
+            ("period", "respondent", "type"),
         )
         renewable_payload = fetch_all_pages(
             api_key,
@@ -350,6 +394,7 @@ def main() -> int:
             end,
             expected_renewable_rows,
             "renewable",
+            ("period", "respondent", "fueltype"),
         )
 
         write_json_after_success(args.demand_output, demand_payload)

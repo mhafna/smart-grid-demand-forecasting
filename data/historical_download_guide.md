@@ -29,12 +29,14 @@ After successful validation and build:
 
 - `data/processed/eia_ciso_hourly_2022_2024.csv`
 
-The processed CSV preserves the same column names as the sample CSV:
+The processed CSV preserves the sample CSV's analytical column names and adds
+one historical quality flag:
 
 - `period`
 - `demand_mwh`
 - `solar_generation_mwh`
 - `wind_generation_mwh`
+- `renewable_data_complete` (historical quality flag)
 - `solar_wind_generation_mwh`
 - `residual_demand_after_solar_wind_mwh`
 - `solar_wind_share_pct`
@@ -47,7 +49,8 @@ Set the EIA key only in your shell environment. The historical script reads
 PowerShell example:
 
 ```powershell
-$env:EIA_API_KEY = "your-real-key-here"
+$secureKey = Read-Host "Enter EIA API key" -AsSecureString
+$env:EIA_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
 ```
 
 Do not commit the key, paste it into documentation, or print it in terminal
@@ -75,20 +78,71 @@ Build the processed historical CSV:
 python src\build_historical_dataset.py
 ```
 
+Remove the key from the current shell after the download:
+
+```powershell
+Remove-Item Env:EIA_API_KEY
+Remove-Variable secureKey
+```
+
+## Expected Command Results
+
+For the confirmed EIA source responses, the downloader should complete all
+pages, report 26,304 demand rows, warn that 52,560 renewable rows are available
+instead of the theoretical 52,608, and then save both raw files.
+
+The validator should report:
+
+```text
+Download integrity: PASS
+Demand coverage: PASS
+Renewable source coverage: WARNING
+Missing renewable timestamps: 24
+Unexpected gaps: none
+Overall result: PASS WITH DOCUMENTED SOURCE COVERAGE WARNING
+```
+
+The builder should write 26,304 processed rows and report 26,280 complete and
+24 incomplete renewable rows.
+
 ## How Pagination Works
 
 EIA JSON API responses are limited to 5,000 rows per request. A three-year
 hourly file has more rows than that, so the script asks for the data in pages.
 
 The first request starts at `offset=0` and asks for up to `length=5000` rows.
-EIA also returns `response.total`, which says how many matching rows exist for
-the full request. If `response.total` is larger than the rows already received,
-the script asks for the next page using a larger offset. It keeps going until
-the number of downloaded rows matches the expected total for the requested
-complete hourly range.
+EIA also returns `response.total`, which says how many matching source rows
+exist for the full request. If `response.total` is larger than the rows already
+received, the script asks for the next page using a larger offset. It keeps
+going until the number downloaded exactly matches `response.total`.
+
+The script separately calculates theoretical complete hourly coverage. A
+smaller EIA total produces a visible source-coverage warning, but it does not
+make complete API pages look like a pagination failure. Changing totals,
+duplicate rows, failed pages, or stopping before `response.total` remain hard
+failures.
 
 Demand has one row per hour. Solar and wind generation have two rows per hour:
 one for `SUN` and one for `WND`.
+
+## Documented Source Gap
+
+Official EIA responses omit both `SUN` and `WND` from `2024-11-02T08` through
+`2024-11-03T07`, inclusive. That is 24 demand timestamps and 48 renewable rows.
+Source systems can contain gaps because publication pipelines may receive no
+observation for a period even when the API itself is operating correctly.
+
+The workflow preserves these values as null. Filling them with zero would
+incorrectly assert that reported generation was zero rather than unavailable.
+The processed CSV keeps all demand hours and sets `renewable_data_complete` to
+`False` for the affected rows. Solar, wind, combined generation, residual
+demand, and renewable share remain null there.
+
+Later demand forecasting may retain these rows when it uses only complete
+demand-derived features. Any feature or evaluation that depends on renewable
+values must filter or otherwise handle `renewable_data_complete` explicitly in
+a documented, chronological pipeline. Renewable analysis must exclude or
+separately report incomplete rows; it must not silently treat them as zero.
 
 ## Runtime And File-Size Considerations
 
@@ -106,8 +160,11 @@ estimate as a result.
 Before starting exploratory analysis:
 
 - The download command must finish without errors.
-- `src\validate_eia_history.py` must report `Overall result: PASS`.
+- `src\validate_eia_history.py` must report `Download integrity: PASS`,
+  `Demand coverage: PASS`, and
+  `Overall result: PASS WITH DOCUMENTED SOURCE COVERAGE WARNING`.
 - `src\build_historical_dataset.py` must write `data/processed/eia_ciso_hourly_2022_2024.csv`.
+- The builder must report 26,280 complete and 24 incomplete renewable rows.
 - The processed CSV should then be inspected with a focused validation step
   before modeling or feature engineering begins.
 

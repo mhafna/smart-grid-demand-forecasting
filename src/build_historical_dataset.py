@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from build_sample_dataset import (
     numeric_column,
     require_fields,
 )
+from validate_eia_history import DOCUMENTED_GAP_END, DOCUMENTED_GAP_START
 
 
 DEFAULT_DEMAND_PATH = Path("data/raw/eia_ciso_hourly_demand_2022_2024.json")
@@ -83,6 +85,19 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
         raise ValueError(f"Historical demand has duplicate hourly timestamps: {preview}")
 
     demand = demand[["timestamp", "period", "demand_mwh"]]
+    demand = demand.sort_values("timestamp").reset_index(drop=True)
+    expected_start = pd.Timestamp("2022-01-01T00")
+    expected_end = pd.Timestamp("2024-12-31T23")
+    if (
+        len(demand) != 26_304
+        or demand["timestamp"].min() != expected_start
+        or demand["timestamp"].max() != expected_end
+        or not demand["timestamp"].diff().dropna().eq(timedelta(hours=1)).all()
+    ):
+        raise ValueError(
+            "Historical demand must contain all 26,304 consecutive hourly "
+            "timestamps from 2022-01-01T00 through 2024-12-31T23."
+        )
 
     renewable = pd.DataFrame(renewable_rows)
     renewable = renewable[renewable["fueltype"].isin(EXPECTED_RENEWABLE_FUELS)].copy()
@@ -121,39 +136,55 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
         }
     )
 
+    renewable_outside_demand = renewable_pivot.index.difference(demand["timestamp"])
+    if not renewable_outside_demand.empty:
+        preview = ", ".join(
+            timestamp.strftime("%Y-%m-%dT%H")
+            for timestamp in renewable_outside_demand[:10]
+        )
+        raise ValueError(
+            "Historical renewable data contains timestamps outside the demand "
+            f"timeline: {preview}"
+        )
+
     combined = demand.merge(
         renewable_pivot,
-        how="outer",
+        how="left",
         left_on="timestamp",
         right_index=True,
         validate="one_to_one",
     )
 
-    required_output_values = [
-        "period",
-        "demand_mwh",
-        "solar_generation_mwh",
-        "wind_generation_mwh",
-    ]
-    missing_rows = combined[combined[required_output_values].isna().any(axis=1)]
-    if not missing_rows.empty:
-        periods = combined.loc[missing_rows.index, "period"].fillna(
-            combined.loc[missing_rows.index, "timestamp"].dt.strftime("%Y-%m-%dT%H")
-        )
-        preview = ", ".join(periods.astype(str).tolist()[:10])
+    if combined[["period", "demand_mwh"]].isna().any().any():
         raise ValueError(
-            "Historical demand, solar, and wind timestamps do not fully align. "
-            f"Missing observations at: {preview}"
+            "The demand timeline contains missing period or demand values after joining."
         )
 
-    combined = combined.sort_values("timestamp").reset_index(drop=True)
-    if combined["timestamp"].duplicated().any():
-        duplicates = combined.loc[combined["timestamp"].duplicated(), "period"].tolist()
+    documented_gap = pd.date_range(
+        DOCUMENTED_GAP_START, DOCUMENTED_GAP_END, freq="h"
+    )
+    for column in ["solar_generation_mwh", "wind_generation_mwh"]:
+        missing_timestamps = pd.DatetimeIndex(
+            combined.loc[combined[column].isna(), "timestamp"]
+        )
+        if not missing_timestamps.equals(documented_gap):
+            preview = ", ".join(
+                timestamp.strftime("%Y-%m-%dT%H")
+                for timestamp in missing_timestamps[:10]
+            )
+            raise ValueError(
+                f"{column} missing timestamps differ from the documented EIA "
+                f"source gap. Observed: {preview or 'none'}"
+            )
+
+    if len(combined) != 26_304 or combined["timestamp"].duplicated().any():
         raise ValueError(
-            "Combined historical data has duplicate timestamps: "
-            + ", ".join(duplicates[:10])
+            "The combined dataset did not preserve the 26,304 unique demand timestamps."
         )
 
+    combined["renewable_data_complete"] = combined[
+        ["solar_generation_mwh", "wind_generation_mwh"]
+    ].notna().all(axis=1)
     combined["solar_wind_generation_mwh"] = (
         combined["solar_generation_mwh"] + combined["wind_generation_mwh"]
     )
@@ -170,6 +201,7 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
             "demand_mwh",
             "solar_generation_mwh",
             "wind_generation_mwh",
+            "renewable_data_complete",
             "solar_wind_generation_mwh",
             "residual_demand_after_solar_wind_mwh",
             "solar_wind_share_pct",
@@ -210,6 +242,10 @@ def main() -> int:
         return 1
 
     print(f"Wrote {len(dataset)} rows to {args.output_path}")
+    complete_rows = int(dataset["renewable_data_complete"].sum())
+    incomplete_rows = len(dataset) - complete_rows
+    print(f"Renewable data complete rows: {complete_rows}")
+    print(f"Renewable data incomplete rows: {incomplete_rows}")
     print(
         "Residual demand note: this subtracts only reported solar and wind "
         "generation from demand; it does not account for other generation, "

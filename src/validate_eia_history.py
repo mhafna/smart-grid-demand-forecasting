@@ -1,10 +1,11 @@
-"""Validate historical EIA CISO hourly demand and solar/wind raw JSON files."""
+"""Validate historical EIA CISO demand and documented renewable coverage."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ DEFAULT_RENEWABLE_PATH = Path(
 EXPECTED_RESPONDENT = "CISO"
 EXPECTED_DEMAND_TYPE = "D"
 EXPECTED_FUELS = {"SUN", "WND"}
+EXPECTED_UNITS = {"megawatthours"}
+
 EXPECTED_DEMAND_FIELDS = {
     "period",
     "respondent",
@@ -35,6 +38,20 @@ EXPECTED_RENEWABLE_FIELDS = {
     "value",
     "value-units",
 }
+OPTIONAL_RENEWABLE_FIELDS = {"type-name", "fueltype-name"}
+
+# Confirmed with the focused EIA diagnostic. This is the only accepted gap.
+DOCUMENTED_GAP_START = datetime(2024, 11, 2, 8)
+DOCUMENTED_GAP_END = datetime(2024, 11, 3, 7)
+
+
+@dataclass
+class PaginatedFile:
+    """Rows plus pagination facts verified from a saved download wrapper."""
+
+    payload: dict[str, Any]
+    rows: list[dict[str, Any]]
+    source_total: int
 
 
 def parse_date(value: str, label: str) -> date:
@@ -44,21 +61,25 @@ def parse_date(value: str, label: str) -> date:
         raise ValueError(f"{label} must use YYYY-MM-DD format.") from exc
 
 
-def parse_period(value: Any, row_number: int, label: str) -> datetime | None:
+def parse_period(value: Any, row_number: int, label: str) -> datetime:
     if not isinstance(value, str):
-        print(f"- {label} row {row_number}: period is not a string: {value!r}")
-        return None
+        raise ValueError(f"{label} row {row_number} period is not a string: {value!r}")
     try:
         return datetime.strptime(value, "%Y-%m-%dT%H")
-    except ValueError:
-        print(f"- {label} row {row_number}: period is not YYYY-MM-DDTHH: {value!r}")
-        return None
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} row {row_number} period is not YYYY-MM-DDTHH: {value!r}"
+        ) from exc
 
 
-def compact_counts(values: Counter[str]) -> str:
-    if not values:
-        return "none observed"
-    return ", ".join(f"{value} ({count})" for value, count in sorted(values.items()))
+def integer_metadata(value: Any, label: str) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is not an integer: {value!r}") from exc
+    if result < 0:
+        raise ValueError(f"{label} cannot be negative: {result}")
+    return result
 
 
 def expected_periods(start_date: date, end_date: date) -> list[datetime]:
@@ -72,60 +93,116 @@ def expected_periods(start_date: date, end_date: date) -> list[datetime]:
     return periods
 
 
-def load_rows(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def documented_gap_periods() -> set[datetime]:
+    periods: set[datetime] = set()
+    current = DOCUMENTED_GAP_START
+    while current <= DOCUMENTED_GAP_END:
+        periods.add(current)
+        current += timedelta(hours=1)
+    return periods
+
+
+def load_paginated_file(
+    path: Path,
+    label: str,
+    theoretical_rows: int,
+    expected_start: str,
+    expected_end: str,
+) -> PaginatedFile:
+    """Load a wrapper and prove every saved page agrees with response.total."""
     with path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
 
     if not isinstance(payload, dict):
         raise ValueError(f"{path} top-level JSON value is not an object.")
 
-    if "pages" not in payload:
-        return payload, rows_from_response(payload, f"{path} response")
-
     pages = payload.get("pages")
-    if not isinstance(pages, list):
-        raise ValueError(f"{path} has a pages field that is not a list.")
+    download = payload.get("download")
+    if not isinstance(pages, list) or not pages:
+        raise ValueError(f"{path} does not contain a non-empty pages list.")
+    if not isinstance(download, dict):
+        raise ValueError(f"{path} does not contain download metadata.")
 
     rows: list[dict[str, Any]] = []
+    source_total: int | None = None
     for page_number, page in enumerate(pages, start=1):
         if not isinstance(page, dict):
             raise ValueError(f"{path} page {page_number} is not an object.")
-        rows.extend(rows_from_response(page, f"{path} page {page_number}"))
-
-    return payload, rows
-
-
-def rows_from_response(payload: dict[str, Any], label: str) -> list[dict[str, Any]]:
-    response = payload.get("response")
-    if not isinstance(response, dict):
-        raise ValueError(f"{label} does not contain a response object.")
-    rows = response.get("data")
-    if not isinstance(rows, list):
-        raise ValueError(f"{label} does not contain response.data as a list.")
-
-    dict_rows: list[dict[str, Any]] = []
-    for row_number, row in enumerate(rows, start=1):
-        if not isinstance(row, dict):
-            raise ValueError(f"{label} row {row_number} is not an object.")
-        dict_rows.append(row)
-    return dict_rows
-
-
-def gap_report(periods: set[datetime]) -> list[str]:
-    gaps: list[str] = []
-    sorted_periods = sorted(periods)
-    for previous, current in zip(sorted_periods, sorted_periods[1:]):
-        step = current - previous
-        if step != timedelta(hours=1):
-            gaps.append(
-                f"{previous.strftime('%Y-%m-%dT%H')} to "
-                f"{current.strftime('%Y-%m-%dT%H')} ({step})"
+        response = page.get("response")
+        if not isinstance(response, dict):
+            raise ValueError(f"{path} page {page_number} has no response object.")
+        page_rows = response.get("data")
+        if not isinstance(page_rows, list):
+            raise ValueError(f"{path} page {page_number} response.data is not a list.")
+        page_total = integer_metadata(
+            response.get("total"), f"{path} page {page_number} response.total"
+        )
+        if source_total is None:
+            source_total = page_total
+        elif page_total != source_total:
+            raise ValueError(
+                f"{path} response.total changed from {source_total} to {page_total} "
+                f"on page {page_number}."
             )
-    return gaps
+        if not page_rows and len(rows) < source_total:
+            raise ValueError(
+                f"{path} page {page_number} is empty before response.total was reached."
+            )
+        for row_number, row in enumerate(page_rows, start=1):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{path} page {page_number} row {row_number} is not an object."
+                )
+            rows.append(row)
+        if len(rows) > source_total:
+            raise ValueError(f"{path} contains more rows than response.total={source_total}.")
 
+        request = page.get("request")
+        if isinstance(request, dict):
+            params = request.get("params")
+            if (
+                isinstance(params, dict)
+                and "api_key" in params
+                and params["api_key"] != "[REDACTED]"
+            ):
+                raise ValueError(f"{path} contains an unredacted API key in page metadata.")
 
-def preview_periods(periods: list[datetime] | set[datetime]) -> str:
-    return ", ".join(period.strftime("%Y-%m-%dT%H") for period in sorted(periods)[:10])
+    if source_total is None or len(rows) != source_total:
+        raise ValueError(
+            f"{path} contains {len(rows)} rows but response.total is {source_total}."
+        )
+
+    expected_metadata = {
+        "theoretical_rows": theoretical_rows,
+        "source_total_rows": source_total,
+        "downloaded_rows": source_total,
+        "page_count": len(pages),
+    }
+    for field, expected_value in expected_metadata.items():
+        actual = integer_metadata(download.get(field), f"{path} download.{field}")
+        if actual != expected_value:
+            raise ValueError(
+                f"{path} download.{field} is {actual}, expected {expected_value}."
+            )
+
+    if download.get("start") != expected_start or download.get("end") != expected_end:
+        raise ValueError(
+            f"{path} metadata range is {download.get('start')!r} through "
+            f"{download.get('end')!r}, expected {expected_start!r} through "
+            f"{expected_end!r}."
+        )
+
+    shortfall = integer_metadata(
+        download.get("source_coverage_shortfall_rows"),
+        f"{path} download.source_coverage_shortfall_rows",
+    )
+    if shortfall != theoretical_rows - source_total:
+        raise ValueError(
+            f"{path} source coverage shortfall metadata is {shortfall}, expected "
+            f"{theoretical_rows - source_total}."
+        )
+
+    return PaginatedFile(payload=payload, rows=rows, source_total=source_total)
 
 
 def validate_history(
@@ -136,109 +213,108 @@ def validate_history(
         end_date = parse_date(end_text, "end date")
         if end_date < start_date:
             raise ValueError("end date must be same as or later than start date.")
-        demand_payload, demand_rows = load_rows(demand_path)
-        renewable_payload, renewable_rows = load_rows(renewable_path)
+
+        expected = expected_periods(start_date, end_date)
+        expected_set = set(expected)
+        expected_hours = len(expected)
+        expected_renewable_rows = expected_hours * len(EXPECTED_FUELS)
+        expected_start = f"{start_date:%Y-%m-%d}T00"
+        expected_end = f"{end_date:%Y-%m-%d}T23"
+
+        demand_file = load_paginated_file(
+            demand_path, "demand", expected_hours, expected_start, expected_end
+        )
+        renewable_file = load_paginated_file(
+            renewable_path,
+            "renewable",
+            expected_renewable_rows,
+            expected_start,
+            expected_end,
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"FAIL: {exc}")
+        print("Download integrity: FAIL")
+        print(f"- {exc}")
+        print("Overall result: FAIL")
         return 1
 
-    expected = expected_periods(start_date, end_date)
-    expected_set = set(expected)
-    expected_hour_count = len(expected)
-    expected_renewable_count = expected_hour_count * len(EXPECTED_FUELS)
-    leap_year_expected = any(
-        period.month == 2 and period.day == 29 for period in expected
-    )
-
     demand_periods: list[datetime] = []
-    demand_combo_counts: Counter[tuple[Any, Any, Any]] = Counter()
+    demand_combos: Counter[tuple[Any, Any, Any]] = Counter()
     demand_respondents: Counter[str] = Counter()
     demand_types: Counter[str] = Counter()
     demand_units: Counter[str] = Counter()
-    demand_missing: list[str] = []
-    demand_non_numeric: list[str] = []
-    demand_unexpected_fields: Counter[str] = Counter()
-    demand_missing_fields: Counter[str] = Counter()
+    demand_content_issues: list[str] = []
 
-    for index, row in enumerate(demand_rows, start=1):
-        row_keys = set(row)
-        for field in row_keys - EXPECTED_DEMAND_FIELDS:
-            demand_unexpected_fields[field] += 1
-        for field in EXPECTED_DEMAND_FIELDS - row_keys:
-            demand_missing_fields[field] += 1
-            demand_missing.append(f"row {index}: missing {field}")
-        for field in EXPECTED_DEMAND_FIELDS & row_keys:
-            if row.get(field) is None or row.get(field) == "":
-                demand_missing.append(f"row {index}: blank {field}")
-
-        period = parse_period(row.get("period"), index, "demand")
-        if period is not None:
+    for index, row in enumerate(demand_file.rows, start=1):
+        missing = EXPECTED_DEMAND_FIELDS - set(row)
+        unexpected = set(row) - EXPECTED_DEMAND_FIELDS
+        if missing or unexpected:
+            demand_content_issues.append(
+                f"row {index} fields missing={sorted(missing)} unexpected={sorted(unexpected)}"
+            )
+        if any(row.get(field) is None or row.get(field) == "" for field in EXPECTED_DEMAND_FIELDS):
+            demand_content_issues.append(f"row {index} has a missing or blank value")
+        try:
+            float(row.get("value"))
+        except (TypeError, ValueError):
+            demand_content_issues.append(f"row {index} has non-numeric demand")
+        try:
+            period = parse_period(row.get("period"), index, "demand")
             demand_periods.append(period)
-        demand_combo_counts[(row.get("period"), row.get("respondent"), row.get("type"))] += 1
-
+        except ValueError as exc:
+            demand_content_issues.append(str(exc))
+        demand_combos[(row.get("period"), row.get("respondent"), row.get("type"))] += 1
         if isinstance(row.get("respondent"), str):
             demand_respondents[row["respondent"]] += 1
         if isinstance(row.get("type"), str):
             demand_types[row["type"]] += 1
         if isinstance(row.get("value-units"), str):
             demand_units[row["value-units"]] += 1
-        try:
-            float(row.get("value"))
-        except (TypeError, ValueError):
-            demand_non_numeric.append(f"row {index}: value {row.get('value')!r}")
 
     renewable_periods_by_fuel: dict[str, list[datetime]] = defaultdict(list)
-    renewable_combo_counts: Counter[tuple[Any, Any, Any]] = Counter()
+    renewable_combos: Counter[tuple[Any, Any, Any]] = Counter()
     renewable_respondents: Counter[str] = Counter()
     renewable_fuels: Counter[str] = Counter()
     renewable_units: Counter[str] = Counter()
-    renewable_missing: list[str] = []
-    renewable_non_numeric: list[str] = []
-    renewable_unexpected_fields: Counter[str] = Counter()
-    renewable_missing_fields: Counter[str] = Counter()
+    renewable_content_issues: list[str] = []
 
-    for index, row in enumerate(renewable_rows, start=1):
-        row_keys = set(row)
-        for field in row_keys - EXPECTED_RENEWABLE_FIELDS:
-            if field not in {"type-name", "fueltype-name"}:
-                renewable_unexpected_fields[field] += 1
-        for field in EXPECTED_RENEWABLE_FIELDS - row_keys:
-            renewable_missing_fields[field] += 1
-            renewable_missing.append(f"row {index}: missing {field}")
-        for field in EXPECTED_RENEWABLE_FIELDS & row_keys:
-            if row.get(field) is None or row.get(field) == "":
-                renewable_missing.append(f"row {index}: blank {field}")
-
-        period = parse_period(row.get("period"), index, "renewable")
+    allowed_renewable_fields = EXPECTED_RENEWABLE_FIELDS | OPTIONAL_RENEWABLE_FIELDS
+    for index, row in enumerate(renewable_file.rows, start=1):
+        missing = EXPECTED_RENEWABLE_FIELDS - set(row)
+        unexpected = set(row) - allowed_renewable_fields
+        if missing or unexpected:
+            renewable_content_issues.append(
+                f"row {index} fields missing={sorted(missing)} unexpected={sorted(unexpected)}"
+            )
+        if any(row.get(field) is None or row.get(field) == "" for field in EXPECTED_RENEWABLE_FIELDS):
+            renewable_content_issues.append(f"row {index} has a missing or blank value")
+        try:
+            float(row.get("value"))
+        except (TypeError, ValueError):
+            renewable_content_issues.append(f"row {index} has non-numeric generation")
         fuel = row.get("fueltype")
-        if period is not None and isinstance(fuel, str):
-            renewable_periods_by_fuel[fuel].append(period)
-        renewable_combo_counts[(row.get("period"), row.get("respondent"), fuel)] += 1
-
+        try:
+            period = parse_period(row.get("period"), index, "renewable")
+            if isinstance(fuel, str):
+                renewable_periods_by_fuel[fuel].append(period)
+        except ValueError as exc:
+            renewable_content_issues.append(str(exc))
+        renewable_combos[(row.get("period"), row.get("respondent"), fuel)] += 1
         if isinstance(row.get("respondent"), str):
             renewable_respondents[row["respondent"]] += 1
         if isinstance(fuel, str):
             renewable_fuels[fuel] += 1
         if isinstance(row.get("value-units"), str):
             renewable_units[row["value-units"]] += 1
-        try:
-            float(row.get("value"))
-        except (TypeError, ValueError):
-            renewable_non_numeric.append(f"row {index}: value {row.get('value')!r}")
 
+    duplicate_demand = {combo: count for combo, count in demand_combos.items() if count > 1}
+    duplicate_renewable = {
+        combo: count for combo, count in renewable_combos.items() if count > 1
+    }
     demand_period_set = set(demand_periods)
-    renewable_period_set = {
-        period for periods in renewable_periods_by_fuel.values() for period in periods
-    }
-    duplicate_demand_combos = {
-        combo: count for combo, count in demand_combo_counts.items() if count > 1
-    }
-    duplicate_renewable_combos = {
-        combo: count for combo, count in renewable_combo_counts.items() if count > 1
-    }
-
-    demand_missing_expected = expected_set - demand_period_set
+    demand_missing = expected_set - demand_period_set
     demand_extra = demand_period_set - expected_set
+
+    documented_missing = documented_gap_periods() & expected_set
     renewable_missing_by_fuel = {
         fuel: expected_set - set(renewable_periods_by_fuel.get(fuel, []))
         for fuel in EXPECTED_FUELS
@@ -247,123 +323,134 @@ def validate_history(
         fuel: set(periods) - expected_set
         for fuel, periods in renewable_periods_by_fuel.items()
     }
-    gaps_demand = gap_report(demand_period_set)
-    gaps_by_fuel = {
-        fuel: gap_report(set(periods))
-        for fuel, periods in sorted(renewable_periods_by_fuel.items())
+    renewable_period_set = set().union(
+        *(set(periods) for periods in renewable_periods_by_fuel.values())
+    )
+    alignment_missing = demand_period_set - renewable_period_set
+    alignment_extra = renewable_period_set - demand_period_set
+    timestamp_alignment_pass = (
+        alignment_missing == documented_missing and not alignment_extra
+    )
+    unexpected_missing = {
+        fuel: periods - documented_missing
+        for fuel, periods in renewable_missing_by_fuel.items()
     }
-    timestamps_align = demand_period_set == renewable_period_set
-    leap_year_observed = any(
-        period.month == 2 and period.day == 29
-        for period in demand_period_set | renewable_period_set
-    )
+    undocumented_present = {
+        fuel: documented_missing - periods
+        for fuel, periods in renewable_missing_by_fuel.items()
+    }
 
-    print("EIA CISO historical raw validation")
-    print(f"Demand file: {demand_path}")
-    print(f"Renewable file: {renewable_path}")
-    print(f"Requested inclusive date range: {start_text} through {end_text}")
-    print()
-
-    print("Demand")
-    print(f"- Row count: {len(demand_rows)}")
-    print(f"- Expected hourly rows: {expected_hour_count}")
-    if demand_periods:
-        print(f"- Earliest timestamp: {min(demand_periods).strftime('%Y-%m-%dT%H')}")
-        print(f"- Latest timestamp: {max(demand_periods).strftime('%Y-%m-%dT%H')}")
-    print(f"- Respondents: {compact_counts(demand_respondents)}")
-    print(f"- Demand type values: {compact_counts(demand_types)}")
-    print(f"- Units: {compact_counts(demand_units)}")
-    print(f"- Missing or blank values: {'none' if not demand_missing else len(demand_missing)}")
-    print(f"- Non-numeric values: {'none' if not demand_non_numeric else len(demand_non_numeric)}")
-    print(
-        "- Duplicate timestamp/respondent/type combinations: "
-        f"{'none' if not duplicate_demand_combos else len(duplicate_demand_combos)}"
-    )
-    print(f"- Hourly gaps: {'none' if not gaps_demand else '; '.join(gaps_demand[:10])}")
-    print(
-        "- Covers requested range: "
-        f"{'yes' if not demand_missing_expected and not demand_extra else 'no'}"
-    )
-    if demand_missing_expected:
-        print(f"  - Missing demand hours: {preview_periods(demand_missing_expected)}")
-    if demand_extra:
-        print(f"  - Demand hours outside request: {preview_periods(demand_extra)}")
-    print(f"- Unexpected fields: {'none' if not demand_unexpected_fields else compact_counts(demand_unexpected_fields)}")
-    print(f"- Missing expected fields: {'none' if not demand_missing_fields else compact_counts(demand_missing_fields)}")
-    print()
-
-    print("Solar and wind")
-    print(f"- Row count: {len(renewable_rows)}")
-    print(f"- Expected rows: {expected_renewable_count}")
-    print(f"- Respondents: {compact_counts(renewable_respondents)}")
-    print(f"- Fuel categories: {compact_counts(renewable_fuels)}")
-    print(f"- Units: {compact_counts(renewable_units)}")
-    for fuel in sorted(EXPECTED_FUELS):
-        periods = renewable_periods_by_fuel.get(fuel, [])
-        print(f"- {fuel} row count: {len(periods)}")
-        if periods:
-            print(f"  - {fuel} earliest: {min(periods).strftime('%Y-%m-%dT%H')}")
-            print(f"  - {fuel} latest: {max(periods).strftime('%Y-%m-%dT%H')}")
-        print(
-            f"  - {fuel} hourly gaps: "
-            f"{'none' if not gaps_by_fuel.get(fuel) else '; '.join(gaps_by_fuel[fuel][:10])}"
-        )
-        print(
-            f"  - {fuel} covers requested range: "
-            f"{'yes' if not renewable_missing_by_fuel[fuel] and not renewable_extra_by_fuel.get(fuel) else 'no'}"
-        )
-    print(f"- Missing or blank values: {'none' if not renewable_missing else len(renewable_missing)}")
-    print(f"- Non-numeric values: {'none' if not renewable_non_numeric else len(renewable_non_numeric)}")
-    print(
-        "- Duplicate timestamp/respondent/fuel combinations: "
-        f"{'none' if not duplicate_renewable_combos else len(duplicate_renewable_combos)}"
-    )
-    print(f"- Unexpected fields: {'none' if not renewable_unexpected_fields else compact_counts(renewable_unexpected_fields)}")
-    print(f"- Missing expected fields: {'none' if not renewable_missing_fields else compact_counts(renewable_missing_fields)}")
-    print()
-
-    print("Cross-checks")
-    print(f"- Demand and renewable timestamps align: {'yes' if timestamps_align else 'no'}")
-    print(
-        "- Leap-year handling: "
-        f"{'Feb 29 expected and observed' if leap_year_expected and leap_year_observed else 'no Feb 29 expected'}"
-    )
-    if leap_year_expected and not leap_year_observed:
-        print("  - Feb 29 is expected for this range but was not observed.")
-    print(f"- Demand metadata top-level keys: {', '.join(sorted(demand_payload))}")
-    print(f"- Renewable metadata top-level keys: {', '.join(sorted(renewable_payload))}")
-
-    passed = all(
+    content_integrity = all(
         [
-            len(demand_rows) == expected_hour_count,
-            len(renewable_rows) == expected_renewable_count,
+            not demand_content_issues,
+            not renewable_content_issues,
+            not duplicate_demand,
+            not duplicate_renewable,
             set(demand_respondents) == {EXPECTED_RESPONDENT},
             set(renewable_respondents) == {EXPECTED_RESPONDENT},
             set(demand_types) == {EXPECTED_DEMAND_TYPE},
             set(renewable_fuels) == EXPECTED_FUELS,
-            not demand_missing,
-            not renewable_missing,
-            not demand_non_numeric,
-            not renewable_non_numeric,
-            not duplicate_demand_combos,
-            not duplicate_renewable_combos,
-            not gaps_demand,
-            not any(gaps_by_fuel.values()),
-            not demand_missing_expected,
-            not demand_extra,
-            not any(renewable_missing_by_fuel.values()),
-            not any(renewable_extra_by_fuel.values()),
-            timestamps_align,
-            not demand_missing_fields,
-            not renewable_missing_fields,
-            not demand_unexpected_fields,
-            not renewable_unexpected_fields,
-            (not leap_year_expected or leap_year_observed),
+            set(demand_units) == EXPECTED_UNITS,
+            set(renewable_units) == EXPECTED_UNITS,
         ]
     )
+    demand_coverage_pass = all(
+        [
+            len(demand_file.rows) == expected_hours,
+            not demand_missing,
+            not demand_extra,
+            len(demand_period_set) == expected_hours,
+        ]
+    )
+    renewable_gap_matches = all(
+        not unexpected_missing[fuel] and not undocumented_present[fuel]
+        for fuel in EXPECTED_FUELS
+    )
+    renewable_coverage_pass = all(
+        [
+            renewable_gap_matches,
+            not any(renewable_extra_by_fuel.values()),
+            renewable_file.source_total
+            == expected_renewable_rows - len(documented_missing) * len(EXPECTED_FUELS),
+            timestamp_alignment_pass,
+        ]
+    )
+    leap_expected = any(period.month == 2 and period.day == 29 for period in expected_set)
+    leap_pass = not leap_expected or all(
+        any(period.month == 2 and period.day == 29 for period in periods)
+        for periods in [demand_periods, *renewable_periods_by_fuel.values()]
+    )
 
+    print("EIA CISO historical raw validation")
+    print(f"Requested inclusive range: {start_text} through {end_text}")
     print()
-    print(f"Overall result: {'PASS' if passed else 'CHECK ISSUES ABOVE'}")
+    print(f"Download integrity: {'PASS' if content_integrity else 'FAIL'}")
+    print(
+        f"- Demand pagination: {len(demand_file.rows)}/{demand_file.source_total} "
+        "rows downloaded"
+    )
+    print(
+        f"- Renewable pagination: {len(renewable_file.rows)}/{renewable_file.source_total} "
+        "rows downloaded"
+    )
+    print(f"- Demand duplicate combinations: {len(duplicate_demand)}")
+    print(f"- Renewable duplicate combinations: {len(duplicate_renewable)}")
+    print(f"- Demand content issues: {len(demand_content_issues)}")
+    print(f"- Renewable content issues: {len(renewable_content_issues)}")
+    print(f"- Demand units: {', '.join(sorted(demand_units)) or 'none'}")
+    print(f"- Renewable units: {', '.join(sorted(renewable_units)) or 'none'}")
+    print()
+
+    print(f"Demand coverage: {'PASS' if demand_coverage_pass else 'FAIL'}")
+    print(f"- Observed rows: {len(demand_file.rows)}")
+    print(f"- Theoretical rows: {expected_hours}")
+    print(f"- Missing demand timestamps: {len(demand_missing)}")
+    print(f"- Demand timestamps outside range: {len(demand_extra)}")
+    if demand_periods:
+        print(f"- Earliest demand timestamp: {min(demand_periods):%Y-%m-%dT%H}")
+        print(f"- Latest demand timestamp: {max(demand_periods):%Y-%m-%dT%H}")
+    print()
+
+    has_documented_warning = bool(documented_missing)
+    renewable_label = "WARNING" if renewable_coverage_pass and has_documented_warning else (
+        "PASS" if renewable_coverage_pass else "FAIL"
+    )
+    missing_renewable_timestamps = set().union(*renewable_missing_by_fuel.values())
+    print(f"Renewable source coverage: {renewable_label}")
+    print(f"- Observed rows: {len(renewable_file.rows)}")
+    print(f"- Theoretical rows: {expected_renewable_rows}")
+    for fuel in sorted(EXPECTED_FUELS):
+        print(
+            f"- {fuel}: {len(renewable_periods_by_fuel.get(fuel, []))}/{expected_hours} rows"
+        )
+    print(f"- Missing renewable timestamps: {len(missing_renewable_timestamps)}")
+    if missing_renewable_timestamps:
+        print(
+            f"- Missing block: {min(missing_renewable_timestamps):%Y-%m-%dT%H} "
+            f"through {max(missing_renewable_timestamps):%Y-%m-%dT%H}"
+        )
+    print(
+        "- Unexpected gaps: "
+        + ("none" if not any(unexpected_missing.values()) else "present")
+    )
+    print(
+        "- Documented rows unexpectedly present: "
+        + ("none" if not any(undocumented_present.values()) else "present")
+    )
+    print(
+        "- Demand/renewable timestamp alignment: "
+        + ("PASS (documented gap only)" if timestamp_alignment_pass else "FAIL")
+    )
+    print(f"- Leap-year handling: {'PASS' if leap_pass else 'FAIL'}")
+
+    passed = all(
+        [content_integrity, demand_coverage_pass, renewable_coverage_pass, leap_pass]
+    )
+    print()
+    if passed and has_documented_warning:
+        print("Overall result: PASS WITH DOCUMENTED SOURCE COVERAGE WARNING")
+    else:
+        print(f"Overall result: {'PASS' if passed else 'FAIL'}")
     return 0 if passed else 1
 
 
@@ -374,15 +461,11 @@ def main() -> int:
     parser.add_argument("start_date", help="Inclusive start date, YYYY-MM-DD.")
     parser.add_argument("end_date", help="Inclusive end date, YYYY-MM-DD.")
     parser.add_argument(
-        "--demand-path",
-        default=DEFAULT_DEMAND_PATH,
-        type=Path,
+        "--demand-path", default=DEFAULT_DEMAND_PATH, type=Path,
         help=f"Demand JSON path. Default: {DEFAULT_DEMAND_PATH}",
     )
     parser.add_argument(
-        "--renewable-path",
-        default=DEFAULT_RENEWABLE_PATH,
-        type=Path,
+        "--renewable-path", default=DEFAULT_RENEWABLE_PATH, type=Path,
         help=f"Renewable JSON path. Default: {DEFAULT_RENEWABLE_PATH}",
     )
     args = parser.parse_args()
