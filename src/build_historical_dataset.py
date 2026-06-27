@@ -13,10 +13,12 @@ import pandas as pd
 from build_sample_dataset import (
     EXPECTED_RENEWABLE_FUELS,
     add_timestamp_column,
-    numeric_column,
-    require_fields,
 )
-from validate_eia_history import DOCUMENTED_GAP_END, DOCUMENTED_GAP_START
+from validate_eia_history import (
+    DOCUMENTED_GAP_END,
+    DOCUMENTED_GAP_START,
+    DOCUMENTED_NULL_TIMESTAMPS,
+)
 
 
 DEFAULT_DEMAND_PATH = Path("data/raw/eia_ciso_hourly_demand_2022_2024.json")
@@ -27,6 +29,39 @@ DEFAULT_OUTPUT_PATH = Path("data/processed/eia_ciso_hourly_2022_2024.csv")
 
 DEMAND_REQUIRED_FIELDS = {"period", "value"}
 RENEWABLE_REQUIRED_FIELDS = {"period", "fueltype", "value"}
+
+
+def require_fields_present(
+    rows: list[dict[str, Any]], required_fields: set[str], label: str
+) -> None:
+    """Require fields to exist while allowing documented null measurements."""
+    problems: list[str] = []
+    for row_number, row in enumerate(rows, start=1):
+        missing = required_fields - set(row)
+        if missing:
+            problems.append(
+                f"row {row_number}: missing {', '.join(sorted(missing))}"
+            )
+    if problems:
+        preview = "; ".join(problems[:10])
+        raise ValueError(f"{label} has missing required fields: {preview}")
+
+
+def numeric_column_preserving_nulls(
+    frame: pd.DataFrame, source: str, target: str, label: str
+) -> pd.DataFrame:
+    """Convert numeric values while preserving JSON nulls as missing values."""
+    frame = frame.copy()
+    frame[target] = pd.to_numeric(frame[source], errors="coerce")
+    invalid = frame[source].notna() & frame[target].isna()
+    if invalid.any():
+        bad_values = frame.loc[invalid, ["period", source]]
+        preview = ", ".join(
+            f"{row.period}={getattr(row, source)!r}"
+            for row in bad_values.head(10).itertuples(index=False)
+        )
+        raise ValueError(f"{label} has non-null, non-numeric values: {preview}")
+    return frame
 
 
 def load_response_data(path: Path) -> list[dict[str, Any]]:
@@ -72,12 +107,25 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
     """Combine demand, solar, and wind by timestamp without filling gaps."""
     demand_rows = load_response_data(demand_path)
     renewable_rows = load_response_data(renewable_path)
-    require_fields(demand_rows, DEMAND_REQUIRED_FIELDS, "Historical demand")
-    require_fields(renewable_rows, RENEWABLE_REQUIRED_FIELDS, "Historical renewable")
+    require_fields_present(demand_rows, DEMAND_REQUIRED_FIELDS, "Historical demand")
+    require_fields_present(
+        renewable_rows, RENEWABLE_REQUIRED_FIELDS, "Historical renewable"
+    )
 
     demand = pd.DataFrame(demand_rows)
     demand = add_timestamp_column(demand, "Historical demand")
-    demand = numeric_column(demand, "value", "demand_mwh", "Historical demand")
+    demand = numeric_column_preserving_nulls(
+        demand, "value", "demand_mwh", "Historical demand"
+    )
+
+    observed_demand_nulls = set(
+        demand.loc[demand["value"].isna(), "timestamp"].dt.to_pydatetime()
+    )
+    if observed_demand_nulls != DOCUMENTED_NULL_TIMESTAMPS:
+        raise ValueError(
+            "Historical demand null timestamps differ from the documented EIA "
+            "source exceptions. Run validate_eia_history.py for details."
+        )
 
     duplicate_demand = demand.loc[demand["timestamp"].duplicated(), "period"].tolist()
     if duplicate_demand:
@@ -100,18 +148,33 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
         )
 
     renewable = pd.DataFrame(renewable_rows)
-    renewable = renewable[renewable["fueltype"].isin(EXPECTED_RENEWABLE_FUELS)].copy()
+    observed_fuels = set(renewable["fueltype"])
+    if observed_fuels != EXPECTED_RENEWABLE_FUELS:
+        raise ValueError(
+            "Historical renewable fuel categories differ from SUN and WND: "
+            + ", ".join(sorted(str(fuel) for fuel in observed_fuels))
+        )
     renewable = add_timestamp_column(renewable, "Historical renewable")
-    renewable = numeric_column(
+    renewable = numeric_column_preserving_nulls(
         renewable, "value", "generation_mwh", "Historical renewable"
     )
 
-    observed_fuels = set(renewable["fueltype"])
-    missing_fuels = EXPECTED_RENEWABLE_FUELS - observed_fuels
-    if missing_fuels:
+    observed_renewable_nulls = set(
+        zip(
+            renewable.loc[renewable["value"].isna(), "timestamp"].dt.to_pydatetime(),
+            renewable.loc[renewable["value"].isna(), "fueltype"],
+        )
+    )
+    expected_renewable_nulls = {
+        (period, fuel)
+        for period in DOCUMENTED_NULL_TIMESTAMPS
+        for fuel in EXPECTED_RENEWABLE_FUELS
+    }
+    if observed_renewable_nulls != expected_renewable_nulls:
         raise ValueError(
-            "Historical renewable data is missing expected fuel categories: "
-            + ", ".join(sorted(missing_fuels))
+            "Historical renewable null timestamp/fuel combinations differ from "
+            "the documented EIA source exceptions. Run validate_eia_history.py "
+            "for details."
         )
 
     duplicate_renewable = renewable.loc[
@@ -155,19 +218,22 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
         validate="one_to_one",
     )
 
-    if combined[["period", "demand_mwh"]].isna().any().any():
+    if combined["period"].isna().any():
         raise ValueError(
-            "The demand timeline contains missing period or demand values after joining."
+            "The demand timeline contains a missing period after joining."
         )
 
-    documented_gap = pd.date_range(
-        DOCUMENTED_GAP_START, DOCUMENTED_GAP_END, freq="h"
+    documented_renewable_unavailable = pd.DatetimeIndex(
+        sorted(
+            set(pd.date_range(DOCUMENTED_GAP_START, DOCUMENTED_GAP_END, freq="h"))
+            | {pd.Timestamp(period) for period in DOCUMENTED_NULL_TIMESTAMPS}
+        )
     )
     for column in ["solar_generation_mwh", "wind_generation_mwh"]:
         missing_timestamps = pd.DatetimeIndex(
             combined.loc[combined[column].isna(), "timestamp"]
         )
-        if not missing_timestamps.equals(documented_gap):
+        if not missing_timestamps.equals(documented_renewable_unavailable):
             preview = ", ".join(
                 timestamp.strftime("%Y-%m-%dT%H")
                 for timestamp in missing_timestamps[:10]
@@ -182,18 +248,22 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
             "The combined dataset did not preserve the 26,304 unique demand timestamps."
         )
 
+    combined["demand_data_complete"] = combined["demand_mwh"].notna()
     combined["renewable_data_complete"] = combined[
         ["solar_generation_mwh", "wind_generation_mwh"]
     ].notna().all(axis=1)
     combined["solar_wind_generation_mwh"] = (
         combined["solar_generation_mwh"] + combined["wind_generation_mwh"]
+    ).where(combined["renewable_data_complete"])
+    all_inputs_complete = (
+        combined["demand_data_complete"] & combined["renewable_data_complete"]
     )
     combined["residual_demand_after_solar_wind_mwh"] = (
         combined["demand_mwh"] - combined["solar_wind_generation_mwh"]
-    )
+    ).where(all_inputs_complete)
     combined["solar_wind_share_pct"] = (
         combined["solar_wind_generation_mwh"] / combined["demand_mwh"] * 100
-    )
+    ).where(all_inputs_complete)
 
     return combined[
         [
@@ -201,6 +271,7 @@ def build_dataset(demand_path: Path, renewable_path: Path) -> pd.DataFrame:
             "demand_mwh",
             "solar_generation_mwh",
             "wind_generation_mwh",
+            "demand_data_complete",
             "renewable_data_complete",
             "solar_wind_generation_mwh",
             "residual_demand_after_solar_wind_mwh",
@@ -242,10 +313,14 @@ def main() -> int:
         return 1
 
     print(f"Wrote {len(dataset)} rows to {args.output_path}")
-    complete_rows = int(dataset["renewable_data_complete"].sum())
-    incomplete_rows = len(dataset) - complete_rows
-    print(f"Renewable data complete rows: {complete_rows}")
-    print(f"Renewable data incomplete rows: {incomplete_rows}")
+    demand_complete_rows = int(dataset["demand_data_complete"].sum())
+    renewable_complete_rows = int(dataset["renewable_data_complete"].sum())
+    print(f"Demand data complete rows: {demand_complete_rows}")
+    print(f"Demand data incomplete rows: {len(dataset) - demand_complete_rows}")
+    print(f"Renewable data complete rows: {renewable_complete_rows}")
+    print(
+        f"Renewable data incomplete rows: {len(dataset) - renewable_complete_rows}"
+    )
     print(
         "Residual demand note: this subtracts only reported solar and wind "
         "generation from demand; it does not account for other generation, "

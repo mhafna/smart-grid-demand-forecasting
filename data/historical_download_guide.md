@@ -30,12 +30,13 @@ After successful validation and build:
 - `data/processed/eia_ciso_hourly_2022_2024.csv`
 
 The processed CSV preserves the sample CSV's analytical column names and adds
-one historical quality flag:
+two historical quality flags:
 
 - `period`
 - `demand_mwh`
 - `solar_generation_mwh`
 - `wind_generation_mwh`
+- `demand_data_complete` (historical quality flag)
 - `renewable_data_complete` (historical quality flag)
 - `solar_wind_generation_mwh`
 - `residual_demand_after_solar_wind_mwh`
@@ -95,15 +96,18 @@ The validator should report:
 
 ```text
 Download integrity: PASS
-Demand coverage: PASS
-Renewable source coverage: WARNING
+Demand timestamp coverage: PASS
+Demand measurement completeness: WARNING
+Renewable row coverage: WARNING
+Renewable measurement completeness: WARNING
 Missing renewable timestamps: 24
-Unexpected gaps: none
-Overall result: PASS WITH DOCUMENTED SOURCE COVERAGE WARNING
+Unexpected gaps or nulls: none
+Overall result: PASS WITH DOCUMENTED SOURCE DATA WARNINGS
 ```
 
-The builder should write 26,304 processed rows and report 26,280 complete and
-24 incomplete renewable rows.
+The builder should write 26,304 processed rows. It should report 26,299 complete
+and 5 incomplete demand rows, plus 26,275 complete and 29 incomplete renewable
+rows.
 
 ## How Pagination Works
 
@@ -138,11 +142,23 @@ The processed CSV keeps all demand hours and sets `renewable_data_complete` to
 `False` for the affected rows. Solar, wind, combined generation, residual
 demand, and renewable share remain null there.
 
-Later demand forecasting may retain these rows when it uses only complete
-demand-derived features. Any feature or evaluation that depends on renewable
-values must filter or otherwise handle `renewable_data_complete` explicitly in
-a documented, chronological pipeline. Renewable analysis must exclude or
-separately report incomplete rows; it must not silently treat them as zero.
+## Documented Null Measurements
+
+EIA returned present rows with JSON `null` values for demand, `SUN`, and `WND`
+at five timestamps: `2022-01-05T10`, `2022-05-17T18`, `2022-06-13T18`,
+`2023-10-31T21`, and `2023-11-14T20`.
+
+These differ from the missing-row block because the records exist but their
+measurements are unavailable. The master CSV preserves the null values and
+marks both quality flags false at these timestamps. See
+`data/historical_data_quality.md` for the full policy.
+
+Later demand forecasting must never train or evaluate a target where
+`demand_data_complete=False`. Any renewable-aware feature or evaluation must
+require `renewable_data_complete=True`. The master CSV retains every timestamp;
+filtering occurs only in downstream datasets and must be reported. All
+modelling datasets must still use chronological splits and avoid future-data
+leakage.
 
 ## Runtime And File-Size Considerations
 
@@ -161,10 +177,11 @@ Before starting exploratory analysis:
 
 - The download command must finish without errors.
 - `src\validate_eia_history.py` must report `Download integrity: PASS`,
-  `Demand coverage: PASS`, and
-  `Overall result: PASS WITH DOCUMENTED SOURCE COVERAGE WARNING`.
+  `Demand timestamp coverage: PASS`, and
+  `Overall result: PASS WITH DOCUMENTED SOURCE DATA WARNINGS`.
 - `src\build_historical_dataset.py` must write `data/processed/eia_ciso_hourly_2022_2024.csv`.
-- The builder must report 26,280 complete and 24 incomplete renewable rows.
+- The builder must report 26,299 complete demand rows and 26,275 complete
+  renewable rows while retaining all 26,304 timestamps.
 - The processed CSV should then be inspected with a focused validation step
   before modeling or feature engineering begins.
 
