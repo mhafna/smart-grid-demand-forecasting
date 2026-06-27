@@ -7,3 +7,6 @@
 
 # pandas is used for tabular data preparation and time-series analysis.
 pandas
+
+# matplotlib is used to create the reproducible EDA charts saved as PNG files.
+matplotlib
