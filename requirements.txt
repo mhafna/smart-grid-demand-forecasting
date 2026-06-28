@@ -16,3 +16,9 @@ scikit-learn
 
 # xgboost provides the gradient-boosted tree regressor used in one-step modelling.
 xgboost
+
+# streamlit provides the lightweight interactive dashboard UI.
+streamlit
+
+# plotly provides responsive, accessible charts inside the Streamlit dashboard.
+plotly
