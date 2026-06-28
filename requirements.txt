@@ -10,3 +10,9 @@ pandas
 
 # matplotlib is used to create the reproducible EDA charts saved as PNG files.
 matplotlib
+
+# scikit-learn provides the leakage-safe scaling pipeline and Linear Regression.
+scikit-learn
+
+# xgboost provides the gradient-boosted tree regressor used in one-step modelling.
+xgboost
