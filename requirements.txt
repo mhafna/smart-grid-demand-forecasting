@@ -1,9 +1,9 @@
-# Project dependencies will be added gradually as they are needed.
-# Each dependency should be added with a short explanation in the project notes or commit message.
-
 # No external package is needed for src/fetch_eia_sample.py.
 # It uses Python's standard library to read EIA_API_KEY, make one HTTPS request,
 # validate the JSON response, and save the raw file.
+
+# numpy provides numerical arrays and metric calculations throughout the analysis.
+numpy
 
 # pandas is used for tabular data preparation and time-series analysis.
 pandas
@@ -13,6 +13,9 @@ matplotlib
 
 # scikit-learn provides the leakage-safe scaling pipeline and Linear Regression.
 scikit-learn
+
+# joblib saves and reloads fitted model artifacts during full pipeline reproduction.
+joblib
 
 # xgboost provides the gradient-boosted tree regressor used in one-step modelling.
 xgboost

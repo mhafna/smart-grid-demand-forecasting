@@ -1,0 +1,5 @@
+threshold_name,threshold_value,quantile,fit_split,fit_start_utc,fit_end_utc,training_row_count,source_definition,validation_rows_used,test_rows_used
+high_demand_mwh,31500.4000000000,0.9000000000,train,2022-01-01,2023-12-31 23:00:00,17515,demand_mwh,0,0
+high_residual_demand_mwh,26798.4000000000,0.9000000000,train,2022-01-01,2023-12-31 23:00:00,17515,demand - solar - wind,0,0
+high_positive_residual_ramp_mwh,5191.4000000000,0.9000000000,train,2022-01-01,2023-12-31 23:00:00,6593,positive consecutive-hour residual-demand ramps,0,0
+low_renewable_share_pct,2.9988479058,0.1000000000,train,2022-01-01,2023-12-31 23:00:00,17515,100 * (solar + wind) / demand,0,0

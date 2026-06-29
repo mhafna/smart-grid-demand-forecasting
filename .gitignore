@@ -35,16 +35,58 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local data, model, and result artifacts
+# Local data and model artifacts
 data/raw/*
 data/processed/*
 models/*
 results/*
 screenshots/*
 
-# Keep folder placeholders tracked
+# Keep documentation and the processed history used by the public dashboard.
 !data/raw/README.md
 !data/processed/README.md
+!data/processed/eia_ciso_hourly_2022_2024.csv
 !models/README.md
 !results/README.md
 !screenshots/README.md
+
+# Track only the validated result tables read by src/dashboard_data.py.
+!results/recursive/
+results/recursive/*
+!results/recursive/tables/
+results/recursive/tables/*
+!results/recursive/tables/recursive_predictions.csv
+!results/recursive/tables/metrics_overall.csv
+!results/recursive/tables/metrics_by_horizon.csv
+
+!results/planning/
+results/planning/*
+!results/planning/tables/
+results/planning/tables/*
+!results/planning/tables/renewable_planning_predictions.csv
+!results/planning/tables/daily_planning_summary.csv
+!results/planning/tables/planning_thresholds.csv
+!results/planning/tables/planning_metrics_overall.csv
+!results/planning/tables/planning_metrics_by_horizon.csv
+
+!results/models/
+results/models/*
+!results/models/tables/
+results/models/tables/*
+!results/models/tables/model_metrics_common_test.csv
+!results/models/tables/model_metrics_common_validation.csv
+!results/models/tables/xgboost_feature_importance_gain_all.csv
+
+# Track the 12 final documentation screenshots, but no ad hoc captures.
+!screenshots/01_overview.png
+!screenshots/02_24_hour_forecast.png
+!screenshots/03_forecast_error_by_horizon.png
+!screenshots/04_renewable_planning.png
+!screenshots/05_residual_demand_scenarios.png
+!screenshots/06_planning_indicators.png
+!screenshots/07_historical_demand_explorer.png
+!screenshots/08_historical_renewables_explorer.png
+!screenshots/09_model_performance.png
+!screenshots/10_recursive_horizon_performance.png
+!screenshots/11_peak_demand_feature_importance.png
+!screenshots/12_data_quality_limitations.png

@@ -1,8 +1,8 @@
-# Data Sources Research
+# Data Sources Research (Pre-Acquisition Record)
 
-Project goal: short-term electricity demand forecasting with renewable-aware grid planning for one clearly defined grid region.
+This document records the source-selection research completed before acquisition. The final project uses EIA hourly electric-system operating data for California ISO from 2022 through 2024; current coverage, quality, methodology, and results are documented in the root README and the other policy files under `data/`.
 
-This document evaluates official public sources only. No data has been downloaded, no API has been called for project data, and no modeling code has been written.
+The candidate notes below are retained as decision history and should not be read as the repository's current project status.
 
 ## Summary Recommendation
 

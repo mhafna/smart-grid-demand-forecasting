@@ -1,0 +1,8 @@
+split,model,algorithm,feature_group,comparison_set_type,observation_count,mae_mwh,rmse_mwh,mape_pct,smape_pct,mean_error_bias_mwh,r_squared
+validation,xgboost__autoregressive_demand,xgboost,autoregressive_demand,common,4368,338.9147781540,447.6406528031,1.4792810459,1.4762142588,16.7541416713,0.9800834123
+validation,xgboost__renewable_history_enhanced,xgboost,renewable_history_enhanced,common,4368,349.7062887674,461.7914314320,1.5311263125,1.5254554666,58.4256307860,0.9788043064
+validation,linear_regression__autoregressive_demand,linear_regression,autoregressive_demand,common,4368,408.2262515173,521.6301844175,1.7741563621,1.7735664120,2.0099861086,0.9729553528
+validation,linear_regression__renewable_history_enhanced,linear_regression,renewable_history_enhanced,common,4368,412.9052312458,523.1104561040,1.7860881584,1.7891658522,-35.6792642684,0.9728016415
+validation,persistence_1h,persistence,persistence,common,4368,780.4574175824,973.4194778478,3.3346648294,3.3478559448,-0.9642857143,0.9058205919
+validation,xgboost__calendar_only,xgboost,calendar_only,common,4368,1225.5896590795,1679.7593535368,5.2353939966,5.2237394657,9.0688436320,0.7195534972
+validation,linear_regression__calendar_only,linear_regression,calendar_only,common,4368,1993.6440813257,2577.4853524008,8.6606640652,8.6523848917,-373.9293807947,0.3396893465

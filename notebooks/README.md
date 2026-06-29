@@ -1,3 +1,3 @@
 # Notebooks
 
-This folder will contain exploratory analysis and experiment notebooks. No notebooks have been added yet.
+The six notebooks document the completed analysis in order: exploratory analysis, feature engineering, chronological baselines, one-step models, recursive 24-hour forecasting, and renewable-aware planning. Production logic and validators live in `src/`; the notebooks are explanatory companions rather than dashboard runtime dependencies.

@@ -84,7 +84,7 @@ The local sample passed the validation checks:
 Command run:
 
 ```powershell
-& 'C:\Users\marya\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' src\validate_eia_sample.py data\raw\eia_ciso_hourly_demand_sample.json
+.\.venv\Scripts\python.exe src\validate_eia_sample.py data\raw\eia_ciso_hourly_demand_sample.json
 ```
 
 Output:
