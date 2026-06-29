@@ -219,6 +219,6 @@ The dashboard validator checks all 12 source schemas, UTC ordering, complete hor
 
 ## Author
 
-Created by [mhafna](https://github.com/mhafna).
+Created by [Maryam Hafna](https://github.com/mhafna).
 
 Data source: U.S. Energy Information Administration, Hourly Electric Grid Monitor / electric-system operating data for California ISO.
